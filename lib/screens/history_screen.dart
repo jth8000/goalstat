@@ -36,8 +36,7 @@ class HistoryScreenState extends State<HistoryScreen> {
     final today = DateTime.now();
     switch (_periodIdx) {
       case 0:
-        final mon = today.subtract(Duration(days: today.weekday - 1));
-        return (DateTime(mon.year, mon.month, mon.day), today);
+        return (Goal.weekStart(today), today);
       case 1:
         return (DateTime(today.year, today.month, 1), today);
       case 2:
@@ -53,50 +52,10 @@ class HistoryScreenState extends State<HistoryScreen> {
     setState(() => _loading = true);
     final (start, end) = _dateRange();
     final entries = await _db.getAllEntries(_fmt(start), _fmt(end));
-    final statuses = await _statusesFor(entries);
+    final statuses = await _db.getEntryStatuses(entries);
     if (mounted) {
       setState(() { _entries = entries; _statuses = statuses; _loading = false; });
     }
-  }
-
-  /// Daily goals are judged per entry; weekly/monthly goals by the total of
-  /// the whole period each entry falls in, which may extend past the range.
-  Future<List<PeriodStatus>> _statusesFor(List<Map<String, dynamic>> entries) async {
-    final goals = {for (final g in await _db.getGoals()) g.id!: g};
-    final today = DateTime.now();
-    final todayStr = _fmt(today);
-    String periodKey(Goal g, String date) =>
-        '${g.id}|${_fmt(g.periodStart(DateTime.parse(date)))}';
-
-    DateTime? earliest;
-    for (final e in entries) {
-      final g = goals[e['goal_id']]!;
-      if (g.isDailyEval) continue;
-      final s = g.periodStart(DateTime.parse(e['date'] as String));
-      if (earliest == null || s.isBefore(earliest)) earliest = s;
-    }
-
-    final totals = <String, double>{};
-    final loggedToday = <int>{};
-    if (earliest != null) {
-      for (final e in await _db.getAllEntries(_fmt(earliest), todayStr)) {
-        final g = goals[e['goal_id']]!;
-        if (g.isDailyEval) continue;
-        final key = periodKey(g, e['date'] as String);
-        totals[key] = (totals[key] ?? 0) + (e['value'] as num).toDouble();
-        if (e['date'] == todayStr) loggedToday.add(g.id!);
-      }
-    }
-
-    return entries.map((e) {
-      final g = goals[e['goal_id']]!;
-      final date = e['date'] as String;
-      final total = g.isDailyEval
-          ? (e['value'] as num).toDouble()
-          : totals[periodKey(g, date)] ?? 0;
-      return periodStatus(g, total, DateTime.parse(date),
-          today: today, loggedToday: loggedToday.contains(g.id));
-    }).toList();
   }
 
   String _formatValue(Map<String, dynamic> e) {

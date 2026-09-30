@@ -55,6 +55,14 @@ class AppDatabase {
     return _instance!;
   }
 
+  /// Current time used by the analytics; tests pin it.
+  @visibleForTesting
+  static DateTime Function() clock = DateTime.now;
+
+  /// Makes [instance] use [db], e.g. an in-memory database from [openAt].
+  @visibleForTesting
+  static void useForTesting(Database db) => _instance = AppDatabase._().._db = db;
+
   Future<Database> get db async {
     _db ??= await _open();
     return _db!;
@@ -67,17 +75,19 @@ class AppDatabase {
     }
 
     final dir = await getApplicationDocumentsDirectory();
-    final path = p.join(dir.path, 'goalstat.db');
-
-    return openDatabase(
-      path,
-      version: 3,
-      onCreate: _onCreate,
-      onUpgrade: _onUpgrade,
-    );
+    return openAt(p.join(dir.path, 'goalstat.db'));
   }
 
-  Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
+  /// Opens the database at [path], creating or upgrading it as needed.
+  static Future<Database> openAt(String path, {DatabaseFactory? factory}) =>
+      (factory ?? databaseFactory).openDatabase(path,
+          options: OpenDatabaseOptions(
+            version: 3,
+            onCreate: _onCreate,
+            onUpgrade: _onUpgrade,
+          ));
+
+  static Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
     if (oldVersion < 2) {
       // Goals used to be soft-deleted; purge them now that deletion is permanent.
       await db.execute(
@@ -92,7 +102,7 @@ class AppDatabase {
     }
   }
 
-  Future<void> _onCreate(Database db, int version) async {
+  static Future<void> _onCreate(Database db, int version) async {
     await db.execute('''
       CREATE TABLE goals (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -179,6 +189,21 @@ class AppDatabase {
     return rows.map(Entry.fromMap).toList();
   }
 
+  /// Every date ('yyyy-MM-dd') that has at least one entry.
+  Future<Set<String>> getLoggedDates() async {
+    final database = await db;
+    final rows = await database.rawQuery('SELECT DISTINCT date FROM entries');
+    return {for (final r in rows) r['date'] as String};
+  }
+
+  Future<DateTime?> getFirstEntryDate(int goalId) async {
+    final database = await db;
+    final rows = await database.rawQuery(
+        'SELECT MIN(date) AS first FROM entries WHERE goal_id=?', [goalId]);
+    final first = rows.first['first'] as String?;
+    return first == null ? null : DateTime.parse(first);
+  }
+
   Future<double> getPeriodSum(int goalId, String start, String end) async {
     final database = await db;
     final result = await database.rawQuery(
@@ -207,11 +232,12 @@ class AppDatabase {
   // The current, in-progress period counts as a hit once it's on target and
   // as a miss once its status is Off (it can no longer succeed). Until then
   // it's ignored, so a half-finished week doesn't break a streak or drag
-  // down a percentage. Today, for daily goals, only ever counts as a hit.
+  // down a percentage. For daily goals, today counts toward percentages as
+  // soon as it's logged, but can't break the streak until the day is over.
 
   Future<(Map<String, double>, bool)> _periodTotals(
       Goal goal, DateTime from) async {
-    final todayStr = _fmt(DateTime.now());
+    final todayStr = _fmt(clock());
     final entries = await getEntriesForGoal(
         goal.id!, _fmt(goal.periodStart(from)), todayStr);
     final totals = <String, double>{};
@@ -226,14 +252,14 @@ class AppDatabase {
   bool? _currentOutcome(Goal goal, double? total, bool loggedToday) {
     if (total != null && goal.isOnTarget(total)) return true;
     if (goal.isDailyEval) return null;
-    final today = DateTime.now();
+    final today = clock();
     final status = periodStatus(goal, total ?? 0, today,
         today: today, loggedToday: loggedToday);
     return status.level == StatusLevel.off ? false : null;
   }
 
   Future<int> getStreak(Goal goal) async {
-    final today = DateTime.now();
+    final today = clock();
     final (totals, loggedToday) = await _periodTotals(goal, DateTime(2000));
     int streak = 0;
 
@@ -252,22 +278,64 @@ class AppDatabase {
   }
 
   /// Percentage of the last [periods] periods (including the current one)
-  /// that were on target. Periods with no entries are skipped.
-  Future<double> getOnTargetPct(Goal goal, int periods) async {
-    final today = DateTime.now();
+  /// that were on target. Periods with no entries are skipped; null when
+  /// there's nothing to judge yet.
+  Future<double?> getOnTargetPct(Goal goal, int periods) async {
+    final today = clock();
     final (totals, loggedToday) =
         await _periodTotals(goal, goal.periodsAgo(today, periods - 1));
     final currentKey = _fmt(goal.periodStart(today));
 
     int onTarget = 0, total = 0;
     totals.forEach((key, sum) {
-      final hit = key == currentKey
+      final hit = key == currentKey && !goal.isDailyEval
           ? _currentOutcome(goal, sum, loggedToday)
           : goal.isOnTarget(sum);
       if (hit == null) return;
       total++;
       if (hit) onTarget++;
     });
-    return total > 0 ? onTarget / total * 100 : 0.0;
+    return total > 0 ? onTarget / total * 100 : null;
+  }
+
+  /// Status of each History row from [getAllEntries]. Daily goals are judged
+  /// per entry; weekly/monthly goals by the total of the whole period each
+  /// entry falls in, which may extend past the rows' date range.
+  Future<List<PeriodStatus>> getEntryStatuses(List<Map<String, dynamic>> entries) async {
+    final goals = {for (final g in await getGoals()) g.id!: g};
+    final today = clock();
+    final todayStr = _fmt(today);
+    String periodKey(Goal g, String date) =>
+        '${g.id}|${_fmt(g.periodStart(DateTime.parse(date)))}';
+
+    DateTime? earliest;
+    for (final e in entries) {
+      final g = goals[e['goal_id']]!;
+      if (g.isDailyEval) continue;
+      final s = g.periodStart(DateTime.parse(e['date'] as String));
+      if (earliest == null || s.isBefore(earliest)) earliest = s;
+    }
+
+    final totals = <String, double>{};
+    final loggedToday = <int>{};
+    if (earliest != null) {
+      for (final e in await getAllEntries(_fmt(earliest), todayStr)) {
+        final g = goals[e['goal_id']]!;
+        if (g.isDailyEval) continue;
+        final key = periodKey(g, e['date'] as String);
+        totals[key] = (totals[key] ?? 0) + (e['value'] as num).toDouble();
+        if (e['date'] == todayStr) loggedToday.add(g.id!);
+      }
+    }
+
+    return entries.map((e) {
+      final g = goals[e['goal_id']]!;
+      final date = e['date'] as String;
+      final total = g.isDailyEval
+          ? (e['value'] as num).toDouble()
+          : totals[periodKey(g, date)] ?? 0;
+      return periodStatus(g, total, DateTime.parse(date),
+          today: today, loggedToday: loggedToday.contains(g.id));
+    }).toList();
   }
 }

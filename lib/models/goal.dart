@@ -1,4 +1,12 @@
 class Goal {
+  /// First day of the week (DateTime.monday … DateTime.sunday) for weekly
+  /// goals. Set from the device's region at startup.
+  static int firstWeekday = DateTime.monday;
+
+  /// Start of the week containing [d].
+  static DateTime weekStart(DateTime d) =>
+      DateTime(d.year, d.month, d.day - (d.weekday - firstWeekday + 7) % 7);
+
   final int? id;
   final String name;
   final String category;
@@ -71,6 +79,15 @@ class Goal {
 
   bool get isBoolean => type == 'boolean';
   bool get isDailyEval => evalPeriod == 'daily';
+
+  /// Daily yes/no goals have no real target: you either do it or avoid it.
+  bool get isDailyYesNo => isBoolean && isDailyEval;
+  bool get isAvoid => !isOnTarget(1);
+
+  /// e.g. '≥ 30', or 'Do it' / 'Avoid it' for daily yes/no goals.
+  String get targetLabel => isDailyYesNo
+      ? (isAvoid ? 'Avoid it' : 'Do it')
+      : '$directionSymbol ${targetValue % 1 == 0 ? targetValue.toInt() : targetValue}';
   bool get isWeeklyEval => evalPeriod == 'weekly';
   bool get isMonthlyEval => evalPeriod == 'monthly';
 
@@ -80,7 +97,7 @@ class Goal {
 
   /// First day of the evaluation period containing [d].
   DateTime periodStart(DateTime d) {
-    if (isWeeklyEval) return DateTime(d.year, d.month, d.day - (d.weekday - 1));
+    if (isWeeklyEval) return weekStart(d);
     if (isMonthlyEval) return DateTime(d.year, d.month, 1);
     return DateTime(d.year, d.month, d.day);
   }
@@ -111,11 +128,20 @@ class Goal {
 
   bool isOnTarget(double value) {
     switch (targetDirection) {
-      case 'gte': return value >= targetValue;
-      case 'lte': return value <= targetValue;
-      default: return value == targetValue;
+      case 'gte': return reaches(value, targetValue);
+      case 'lte': return !exceeds(value, targetValue);
+      default: return reaches(value, targetValue) && !exceeds(value, targetValue);
     }
   }
+
+  // Totals are sums of decimals (0.7 + 0.1 == 0.7999999999999999), so compare
+  // with a small tolerance instead of exactly.
+  static bool reaches(double value, double target) =>
+      value >= target - _tolerance(target);
+  static bool exceeds(double value, double target) =>
+      value > target + _tolerance(target);
+  static double _tolerance(double target) =>
+      1e-9 * (target.abs() > 1 ? target.abs() : 1);
 }
 
 const _sentinel = Object();

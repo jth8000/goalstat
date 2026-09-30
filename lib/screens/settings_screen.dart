@@ -139,7 +139,7 @@ class _GoalTile extends StatelessWidget {
                     )),
                 const SizedBox(height: 4),
                 Text(
-                  '${g.category.isNotEmpty ? "${g.category}  ·  " : ""}${g.isBoolean ? "Yes/No" : "Number${g.unit != null ? " (${g.unit})" : ""}"}  ·  $period  ·  ${g.directionSymbol} ${g.targetValue % 1 == 0 ? g.targetValue.toInt() : g.targetValue}',
+                  '${g.category.isNotEmpty ? "${g.category}  ·  " : ""}${g.isBoolean ? "Yes/No" : "Number${g.unit != null ? " (${g.unit})" : ""}"}  ·  $period  ·  ${g.targetLabel}',
                   style: const TextStyle(color: kMuted, fontSize: 12),
                 ),
               ],
@@ -207,6 +207,7 @@ class _GoalDialogState extends State<_GoalDialog> {
   String _type = 'boolean';
   String _evalPeriod = 'daily';
   String _direction = 'gte';
+  bool _avoid = false;
 
   @override
   void initState() {
@@ -218,10 +219,13 @@ class _GoalDialogState extends State<_GoalDialog> {
       _type = g.type;
       _unitCtrl.text = g.unit ?? '';
       _evalPeriod = g.evalPeriod;
-      _targetCtrl.text = g.targetValue.toString();
+      _targetCtrl.text = g.targetValue % 1 == 0
+          ? g.targetValue.toInt().toString()
+          : g.targetValue.toString();
       _direction = g.targetDirection;
+      _avoid = g.isAvoid;
     } else {
-      _targetCtrl.text = '1.0';
+      _targetCtrl.text = '1';
     }
   }
 
@@ -238,7 +242,9 @@ class _GoalDialogState extends State<_GoalDialog> {
           const SnackBar(content: Text('Goal name is required.')));
       return;
     }
-    final target = double.tryParse(_targetCtrl.text) ?? 1.0;
+    final target = _dailyYesNo
+        ? (_avoid ? 0.0 : 1.0)
+        : double.tryParse(_targetCtrl.text) ?? 1.0;
     final unit = _unitCtrl.text.trim().isEmpty ? null : _unitCtrl.text.trim();
     // Reuse an existing category's spelling so "fitness" groups with "Fitness".
     final typed = _categoryCtrl.text.trim();
@@ -251,9 +257,11 @@ class _GoalDialogState extends State<_GoalDialog> {
       unit: _type == 'boolean' ? null : unit,
       evalPeriod: _evalPeriod,
       targetValue: target,
-      targetDirection: _direction,
+      targetDirection: _dailyYesNo ? (_avoid ? 'lte' : 'gte') : _direction,
     ));
   }
+
+  bool get _dailyYesNo => _type == 'boolean' && _evalPeriod == 'daily';
 
   @override
   Widget build(BuildContext context) {
@@ -289,19 +297,28 @@ class _GoalDialogState extends State<_GoalDialog> {
               labels: const ['Daily', 'Weekly', 'Monthly'],
               onChanged: (v) => setState(() => _evalPeriod = v!),
             )),
-            _field('Direction', _DropdownField<String>(
-              value: _direction,
-              items: const ['gte', 'lte', 'eq'],
-              labels: const ['≥  at least', '≤  at most', '=  exactly'],
-              onChanged: (v) => setState(() => _direction = v!),
-            )),
-            _field(_evalPeriod == 'daily'
-                ? 'Target'
-                : 'Target (total per ${_evalPeriod == 'weekly' ? 'week' : 'month'})',
-                TextField(
-              controller: _targetCtrl,
-              keyboardType: const TextInputType.numberWithOptions(decimal: true),
-            )),
+            if (_dailyYesNo)
+              _field('Goal', _DropdownField<bool>(
+                value: _avoid,
+                items: const [false, true],
+                labels: const ['Do it  (yes = on target)', 'Avoid it  (no = on target)'],
+                onChanged: (v) => setState(() => _avoid = v!),
+              ))
+            else ...[
+              _field('Direction', _DropdownField<String>(
+                value: _direction,
+                items: const ['gte', 'lte', 'eq'],
+                labels: const ['≥  at least', '≤  at most', '=  exactly'],
+                onChanged: (v) => setState(() => _direction = v!),
+              )),
+              _field(_evalPeriod == 'daily'
+                  ? 'Target'
+                  : 'Target (total per ${_evalPeriod == 'weekly' ? 'week' : 'month'})',
+                  TextField(
+                controller: _targetCtrl,
+                keyboardType: const TextInputType.numberWithOptions(decimal: true),
+              )),
+            ],
           ],
         ),
       ),

@@ -45,7 +45,7 @@ PeriodStatus periodStatus(Goal g, double total, DateTime date,
       : end.difference(t).inDays + (loggedToday ? 0 : 1);
 
   final target = g.targetValue;
-  if (g.targetDirection != 'gte' && total > target) {
+  if (g.targetDirection != 'gte' && Goal.exceeds(total, target)) {
     return PeriodStatus(StatusLevel.off, 'over by ${_amount(g, total - target)}');
   }
   if (g.isOnTarget(total)) return const PeriodStatus(StatusLevel.onTarget);
@@ -55,12 +55,12 @@ PeriodStatus periodStatus(Goal g, double total, DateTime date,
   }
   if (g.isBoolean) {
     final maxPossible = total + daysLeft;
-    return maxPossible >= target
+    return Goal.reaches(maxPossible, target)
         ? const PeriodStatus(StatusLevel.onTarget)
         : PeriodStatus(StatusLevel.off, '${_pct(maxPossible, target)}% max possible');
   }
   final elapsed = periodDays - daysLeft;
-  return total >= target * elapsed / periodDays
+  return Goal.reaches(total, target * elapsed / periodDays)
       ? const PeriodStatus(StatusLevel.onTarget)
       : PeriodStatus(StatusLevel.behind, '${_pct(total, target)}% of target');
 }

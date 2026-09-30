@@ -1,4 +1,8 @@
 import 'package:flutter/material.dart';
+import 'package:intl/date_symbol_data_local.dart';
+import 'package:intl/intl.dart';
+
+import 'models/goal.dart';
 
 import 'theme.dart';
 import 'screens/today_screen.dart';
@@ -7,7 +11,21 @@ import 'screens/history_screen.dart';
 import 'screens/settings_screen.dart';
 
 void main() {
+  WidgetsFlutterBinding.ensureInitialized();
+  Goal.firstWeekday = _regionFirstWeekday();
   runApp(const GoalStatApp());
+}
+
+/// First day of the week for the device's region, e.g. Sunday for en_US and
+/// Monday for en_GB or de.
+int _regionFirstWeekday() {
+  final symbols = dateTimeSymbolMap();
+  final locale = Intl.verifiedLocale(
+      WidgetsBinding.instance.platformDispatcher.locale.toString(),
+      symbols.containsKey,
+      onFailure: (_) => 'en_US')!;
+  // intl counts from 0 = Monday; DateTime counts from 1 = Monday.
+  return symbols[locale]!.FIRSTDAYOFWEEK + 1;
 }
 
 class GoalStatApp extends StatelessWidget {
@@ -63,6 +81,7 @@ class _AppShellState extends State<AppShell> {
         selectedIndex: _tab,
         onDestinationSelected: (i) {
           setState(() => _tab = i);
+          if (i == 0) _todayKey.currentState?.checkDayRollover();
           if (i == 1) _dashKey.currentState?.refresh();
           if (i == 2) _historyKey.currentState?.refresh();
         },

@@ -39,9 +39,10 @@ class DashboardScreenState extends State<DashboardScreen> {
       final chartStart = g.periodsAgo(today, _chartPeriods(g) - 1);
       final entries = await _db.getEntriesForGoal(
           g.id!, _fmt(chartStart), _fmt(today));
+      final firstEntry = await _db.getFirstEntryDate(g.id!);
       cards.add(_GoalData(
           goal: g, streak: streak, shortPct: shortPct, longPct: longPct,
-          entries: entries));
+          entries: entries, firstEntry: firstEntry));
     }
 
     if (mounted) setState(() { _cards = cards; _loading = false; });
@@ -67,9 +68,10 @@ class DashboardScreenState extends State<DashboardScreen> {
 class _GoalData {
   final Goal goal;
   final int streak;
-  final double shortPct;
-  final double longPct;
+  final double? shortPct;
+  final double? longPct;
   final List<Entry> entries;
+  final DateTime? firstEntry;
 
   const _GoalData({
     required this.goal,
@@ -77,6 +79,7 @@ class _GoalData {
     required this.shortPct,
     required this.longPct,
     required this.entries,
+    required this.firstEntry,
   });
 }
 
@@ -131,14 +134,12 @@ class _GoalCard extends StatelessWidget {
                 _Stat(label: 'Streak',
                     value: '${data.streak}${g.isWeeklyEval ? 'w' : g.isMonthlyEval ? 'mo' : 'd'}'),
                 const SizedBox(width: 20),
-                _Stat(label: '$shortN-$suffix', value: '${data.shortPct.toStringAsFixed(0)}%',
-                    color: pctColor(data.shortPct)),
+                _PctStat(label: '$shortN-$suffix', pct: data.shortPct),
                 const SizedBox(width: 20),
-                _Stat(label: '$longN-$suffix', value: '${data.longPct.toStringAsFixed(0)}%',
-                    color: pctColor(data.longPct)),
+                _PctStat(label: '$longN-$suffix', pct: data.longPct),
                 const Spacer(),
                 Text(
-                  '${g.directionSymbol} ${g.targetValue % 1 == 0 ? g.targetValue.toInt() : g.targetValue}'
+                  '${g.targetLabel}'
                   '${g.unit != null ? " ${g.unit}" : ""}'
                   '${g.isDailyEval ? "" : " / ${g.periodNoun}"}',
                   style: const TextStyle(color: kMuted, fontSize: 12),
@@ -184,6 +185,19 @@ class _Stat extends StatelessWidget {
   }
 }
 
+class _PctStat extends StatelessWidget {
+  final String label;
+  final double? pct;
+
+  const _PctStat({required this.label, required this.pct});
+
+  @override
+  Widget build(BuildContext context) => pct == null
+      ? _Stat(label: label, value: '—', color: kMuted)
+      : _Stat(label: label, value: '${pct!.toStringAsFixed(0)}%',
+          color: pctColor(pct!));
+}
+
 class _GoalChart extends StatelessWidget {
   final _GoalData data;
   const _GoalChart({required this.data});
@@ -191,7 +205,9 @@ class _GoalChart extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final g = data.goal;
-    if (!g.isDailyEval) {
+    if (data.firstEntry == null) {
+      return const Center(child: Text('No data yet', style: TextStyle(color: kMuted, fontSize: 12)));
+    } else if (!g.isDailyEval) {
       return _PeriodBarChart(data: data);
     } else if (g.isBoolean) {
       return _BooleanGrid(data: data);
@@ -225,9 +241,12 @@ class _PeriodBarChart extends StatelessWidget {
     final loggedToday = data.entries.any((e) => e.date == todayStr);
     // Same status as Today/History: the current period can be on target
     // (still reachable), behind pace or off; past periods are final.
-    final colors = totals.keys.map((key) => statusColor(periodStatus(
-        g, totals[key]!, DateTime.parse(key),
-        today: today, loggedToday: loggedToday).level)).toList();
+    // No bars for periods before the goal was first logged.
+    final firstKey = _fmt(g.periodStart(data.firstEntry!));
+    final colors = totals.keys.map((key) => key.compareTo(firstKey) < 0
+        ? Colors.transparent
+        : statusColor(periodStatus(g, totals[key]!, DateTime.parse(key),
+            today: today, loggedToday: loggedToday).level)).toList();
     final maxY = (vals.isEmpty ? g.targetValue : vals.reduce((a, b) => a > b ? a : b))
         .clamp(g.targetValue, double.infinity) * 1.3;
 
@@ -279,11 +298,13 @@ class _BooleanGrid extends StatelessWidget {
 
       return Row(
         children: List.generate(cols, (i) {
-          final d = today.subtract(Duration(days: cols - 1 - i));
+          final d = DateTime(today.year, today.month, today.day - (cols - 1 - i));
           final key = _fmt(d);
           final val = entryMap[key];
           Color color;
-          if (val == null) {
+          if (d.isBefore(data.firstEntry!)) {
+            color = Colors.transparent;
+          } else if (val == null) {
             color = kSurface2;
           } else {
             color = g.isOnTarget(val) ? kGreen : kRed;
@@ -335,9 +356,14 @@ class _NumberLineChart extends StatelessWidget {
         LineChartBarData(
           spots: spots,
           isCurved: true,
+          preventCurveOverShooting: true,
           color: kPurple,
           barWidth: 2,
-          dotData: const FlDotData(show: false),
+          // Days without entries are gaps, so mark the days that have one.
+          dotData: FlDotData(
+            getDotPainter: (spot, pct, bar, i) => FlDotCirclePainter(
+                radius: 3, color: kPurple, strokeWidth: 0),
+          ),
           belowBarData: BarAreaData(
             show: true,
             color: kPurple.withValues(alpha: 0.12),
