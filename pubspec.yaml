@@ -25,6 +25,18 @@ dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^6.0.0
+  flutter_launcher_icons: ^0.14.4
 
 flutter:
   uses-material-design: true
+
+# Regenerate launcher icons after editing assets/icon/*.svg (render to PNG first):
+#   dart run flutter_launcher_icons
+flutter_launcher_icons:
+  android: true
+  ios: false
+  image_path: "assets/icon/icon.png"
+  adaptive_icon_background: "#1a1b2e"
+  adaptive_icon_foreground: "assets/icon/icon_foreground.png"
+  # The foreground PNG already keeps the art inside the safe zone.
+  adaptive_icon_foreground_inset: 0
