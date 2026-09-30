@@ -6,44 +6,40 @@ import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 import '../models/goal.dart';
 import '../models/entry.dart';
+import '../models/period_status.dart';
 
 const _defaultGoals = [
   {
     'name': 'Cardio', 'category': 'Fitness', 'type': 'boolean',
-    'unit': null, 'frequency': 'daily', 'eval_period': 'daily',
+    'unit': null, 'eval_period': 'daily',
     'target_value': 1.0, 'target_direction': 'gte', 'sort_order': 1,
   },
   {
     'name': 'Strength Training', 'category': 'Fitness', 'type': 'boolean',
-    'unit': null, 'frequency': 'daily', 'eval_period': 'daily',
+    'unit': null, 'eval_period': 'daily',
     'target_value': 1.0, 'target_direction': 'gte', 'sort_order': 2,
   },
   {
     'name': 'Water Intake', 'category': 'Fitness', 'type': 'number',
-    'unit': 'oz', 'frequency': 'daily', 'eval_period': 'daily',
+    'unit': 'oz', 'eval_period': 'daily',
     'target_value': 64.0, 'target_direction': 'gte', 'sort_order': 3,
   },
   {
     'name': 'Eating Out', 'category': 'Habits', 'type': 'boolean',
-    'unit': null, 'frequency': 'daily', 'eval_period': 'weekly',
+    'unit': null, 'eval_period': 'weekly',
     'target_value': 2.0, 'target_direction': 'lte', 'sort_order': 4,
   },
   {
     'name': 'Screen Time', 'category': 'Habits', 'type': 'number',
-    'unit': 'hrs', 'frequency': 'daily', 'eval_period': 'daily',
+    'unit': 'hrs', 'eval_period': 'daily',
     'target_value': 3.0, 'target_direction': 'lte', 'sort_order': 5,
   },
   {
     'name': 'Read', 'category': 'Habits', 'type': 'boolean',
-    'unit': null, 'frequency': 'daily', 'eval_period': 'daily',
+    'unit': null, 'eval_period': 'daily',
     'target_value': 1.0, 'target_direction': 'gte', 'sort_order': 6,
   },
 ];
-
-String weekMonday(DateTime d) {
-  final mon = d.subtract(Duration(days: d.weekday - 1));
-  return _fmt(mon);
-}
 
 String _fmt(DateTime d) =>
     '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
@@ -75,9 +71,25 @@ class AppDatabase {
 
     return openDatabase(
       path,
-      version: 1,
+      version: 3,
       onCreate: _onCreate,
+      onUpgrade: _onUpgrade,
     );
+  }
+
+  Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
+    if (oldVersion < 2) {
+      // Goals used to be soft-deleted; purge them now that deletion is permanent.
+      await db.execute(
+          'DELETE FROM entries WHERE goal_id IN (SELECT id FROM goals WHERE active=0)');
+      await db.execute('DELETE FROM goals WHERE active=0');
+    }
+    if (oldVersion < 3) {
+      // The separate 'frequency' setting is gone; weekly-logged goals were
+      // already evaluated weekly, but make sure.
+      await db.execute(
+          "UPDATE goals SET eval_period='weekly' WHERE frequency='weekly'");
+    }
   }
 
   Future<void> _onCreate(Database db, int version) async {
@@ -88,7 +100,6 @@ class AppDatabase {
         category TEXT NOT NULL DEFAULT 'Habits',
         type TEXT NOT NULL DEFAULT 'boolean',
         unit TEXT,
-        frequency TEXT NOT NULL DEFAULT 'daily',
         eval_period TEXT NOT NULL DEFAULT 'daily',
         target_value REAL DEFAULT 1.0,
         target_direction TEXT NOT NULL DEFAULT 'gte',
@@ -112,12 +123,9 @@ class AppDatabase {
 
   // --- Goals ---
 
-  Future<List<Goal>> getGoals({bool activeOnly = true}) async {
+  Future<List<Goal>> getGoals() async {
     final database = await db;
-    final q = activeOnly
-        ? 'SELECT * FROM goals WHERE active=1 ORDER BY sort_order, id'
-        : 'SELECT * FROM goals ORDER BY sort_order, id';
-    final rows = await database.rawQuery(q);
+    final rows = await database.rawQuery('SELECT * FROM goals ORDER BY sort_order, id');
     return rows.map(Goal.fromMap).toList();
   }
 
@@ -137,9 +145,12 @@ class AppDatabase {
     await database.update('goals', goal.toMap(), where: 'id=?', whereArgs: [goal.id]);
   }
 
-  Future<void> deactivateGoal(int id) async {
+  Future<void> deleteGoal(int id) async {
     final database = await db;
-    await database.update('goals', {'active': 0}, where: 'id=?', whereArgs: [id]);
+    await database.transaction((txn) async {
+      await txn.delete('entries', where: 'goal_id=?', whereArgs: [id]);
+      await txn.delete('goals', where: 'id=?', whereArgs: [id]);
+    });
   }
 
   // --- Entries ---
@@ -168,11 +179,11 @@ class AppDatabase {
     return rows.map(Entry.fromMap).toList();
   }
 
-  Future<double> getWeeklySum(int goalId, String monday, String sunday) async {
+  Future<double> getPeriodSum(int goalId, String start, String end) async {
     final database = await db;
     final result = await database.rawQuery(
         'SELECT COALESCE(SUM(value), 0) as total FROM entries WHERE goal_id=? AND date>=? AND date<=?',
-        [goalId, monday, sunday]);
+        [goalId, start, end]);
     return (result.first['total'] as num).toDouble();
   }
 
@@ -181,90 +192,82 @@ class AppDatabase {
     return database.rawQuery('''
       SELECT e.date, e.value, e.goal_id,
              g.name, g.category, g.type, g.unit,
-             g.frequency, g.eval_period, g.target_value, g.target_direction, g.sort_order
+             g.eval_period, g.target_value, g.target_direction, g.sort_order
       FROM entries e
       JOIN goals g ON e.goal_id = g.id
-      WHERE e.date >= ? AND e.date <= ? AND g.active = 1
+      WHERE e.date >= ? AND e.date <= ?
       ORDER BY e.date DESC, g.sort_order
     ''', [start, end]);
   }
 
   // --- Analytics ---
+  //
+  // Entries are logged daily. A goal's eval period (day/week/month) decides
+  // how they're totalled: each period's sum is compared against the target.
+  // The current, in-progress period counts as a hit once it's on target and
+  // as a miss once its status is Off (it can no longer succeed). Until then
+  // it's ignored, so a half-finished week doesn't break a streak or drag
+  // down a percentage. Today, for daily goals, only ever counts as a hit.
+
+  Future<(Map<String, double>, bool)> _periodTotals(
+      Goal goal, DateTime from) async {
+    final todayStr = _fmt(DateTime.now());
+    final entries = await getEntriesForGoal(
+        goal.id!, _fmt(goal.periodStart(from)), todayStr);
+    final totals = <String, double>{};
+    for (final e in entries) {
+      final key = _fmt(goal.periodStart(DateTime.parse(e.date)));
+      totals[key] = (totals[key] ?? 0) + e.value;
+    }
+    return (totals, entries.any((e) => e.date == todayStr));
+  }
+
+  /// true = hit, false = miss, null = not decided yet.
+  bool? _currentOutcome(Goal goal, double? total, bool loggedToday) {
+    if (total != null && goal.isOnTarget(total)) return true;
+    if (goal.isDailyEval) return null;
+    final today = DateTime.now();
+    final status = periodStatus(goal, total ?? 0, today,
+        today: today, loggedToday: loggedToday);
+    return status.level == StatusLevel.off ? false : null;
+  }
 
   Future<int> getStreak(Goal goal) async {
     final today = DateTime.now();
-    final todayStr = _fmt(today);
+    final (totals, loggedToday) = await _periodTotals(goal, DateTime(2000));
     int streak = 0;
 
-    if (goal.isWeeklyEval) {
-      DateTime check = today;
-      for (int i = 0; i < 520; i++) {
-        final mon = check.subtract(Duration(days: check.weekday - 1));
-        final sun = mon.add(const Duration(days: 6));
-        final monStr = _fmt(mon);
-        final sunStr = _fmt(sun);
-        final entries = await getEntriesForGoal(goal.id!, monStr, sunStr);
-        if (entries.isEmpty) {
-          if (monStr == weekMonday(today)) {
-            check = mon.subtract(const Duration(days: 1));
-            continue;
-          }
-          break;
-        }
-        final total = entries.fold(0.0, (s, e) => s + e.value);
-        if (goal.isOnTarget(total)) {
-          streak++;
-          check = mon.subtract(const Duration(days: 1));
-        } else {
-          break;
-        }
+    for (int i = 0; ; i++) {
+      final total = totals[_fmt(goal.periodsAgo(today, i))];
+      if (i == 0) {
+        final outcome = _currentOutcome(goal, total, loggedToday);
+        if (outcome == false) return 0;
+        if (outcome == true) streak++;
+        continue;
       }
-    } else {
-      DateTime check = today;
-      for (int i = 0; i < 3650; i++) {
-        final dateStr = _fmt(check);
-        final entry = await getEntry(goal.id!, dateStr);
-        if (entry == null) {
-          if (dateStr == todayStr) {
-            check = check.subtract(const Duration(days: 1));
-            continue;
-          }
-          break;
-        }
-        if (goal.isOnTarget(entry.value)) {
-          streak++;
-          check = check.subtract(const Duration(days: 1));
-        } else {
-          break;
-        }
-      }
+      if (total == null || !goal.isOnTarget(total)) break;
+      streak++;
     }
     return streak;
   }
 
-  Future<(int, int, double)> getOnTargetPct(
-      Goal goal, String start, String end) async {
-    final entries = await getEntriesForGoal(goal.id!, start, end);
-    if (entries.isEmpty) return (0, 0, 0.0);
+  /// Percentage of the last [periods] periods (including the current one)
+  /// that were on target. Periods with no entries are skipped.
+  Future<double> getOnTargetPct(Goal goal, int periods) async {
+    final today = DateTime.now();
+    final (totals, loggedToday) =
+        await _periodTotals(goal, goal.periodsAgo(today, periods - 1));
+    final currentKey = _fmt(goal.periodStart(today));
 
-    int onTarget, total;
-
-    if (goal.isWeeklyEval) {
-      final weeks = <String, List<double>>{};
-      for (final e in entries) {
-        final mon = weekMonday(DateTime.parse(e.date));
-        weeks.putIfAbsent(mon, () => []).add(e.value);
-      }
-      onTarget = weeks.values
-          .where((vals) => goal.isOnTarget(vals.fold(0.0, (a, b) => a + b)))
-          .length;
-      total = weeks.length;
-    } else {
-      onTarget = entries.where((e) => goal.isOnTarget(e.value)).length;
-      total = entries.length;
-    }
-
-    final pct = total > 0 ? onTarget / total * 100 : 0.0;
-    return (onTarget, total, pct);
+    int onTarget = 0, total = 0;
+    totals.forEach((key, sum) {
+      final hit = key == currentKey
+          ? _currentOutcome(goal, sum, loggedToday)
+          : goal.isOnTarget(sum);
+      if (hit == null) return;
+      total++;
+      if (hit) onTarget++;
+    });
+    return total > 0 ? onTarget / total * 100 : 0.0;
   }
 }

@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import 'models/period_status.dart';
+
 const kBg = Color(0xFF1a1b2e);
 const kSurface = Color(0xFF242636);
 const kSurface2 = Color(0xFF2e3048);
@@ -97,6 +99,12 @@ ThemeData appTheme() {
     ),
   );
 }
+
+Color statusColor(StatusLevel level) => switch (level) {
+      StatusLevel.onTarget => kGreen,
+      StatusLevel.behind => kOrange,
+      StatusLevel.off => kRed,
+    };
 
 Color pctColor(double pct) {
   if (pct >= 80) return kGreen;

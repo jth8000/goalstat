@@ -4,6 +4,7 @@ import 'package:fl_chart/fl_chart.dart';
 import '../data/database.dart';
 import '../models/goal.dart';
 import '../models/entry.dart';
+import '../models/period_status.dart';
 import '../theme.dart';
 
 class DashboardScreen extends StatefulWidget {
@@ -28,20 +29,18 @@ class DashboardScreenState extends State<DashboardScreen> {
     setState(() => _loading = true);
     final goals = await _db.getGoals();
     final today = DateTime.now();
-    final monthAgo = today.subtract(const Duration(days: 30));
-    final weekAgo = today.subtract(const Duration(days: 7));
 
     final cards = <_GoalData>[];
     for (final g in goals) {
       final streak = await _db.getStreak(g);
-      final weekResult = await _db.getOnTargetPct(g, _fmt(weekAgo), _fmt(today));
-      final monthResult = await _db.getOnTargetPct(g, _fmt(monthAgo), _fmt(today));
-      final weekPct = weekResult.$3;
-      final monthPct = monthResult.$3;
+      final (shortN, longN) = _pctPeriods(g);
+      final shortPct = await _db.getOnTargetPct(g, shortN);
+      final longPct = await _db.getOnTargetPct(g, longN);
+      final chartStart = g.periodsAgo(today, _chartPeriods(g) - 1);
       final entries = await _db.getEntriesForGoal(
-          g.id!, _fmt(monthAgo), _fmt(today));
+          g.id!, _fmt(chartStart), _fmt(today));
       cards.add(_GoalData(
-          goal: g, streak: streak, weekPct: weekPct, monthPct: monthPct,
+          goal: g, streak: streak, shortPct: shortPct, longPct: longPct,
           entries: entries));
     }
 
@@ -68,15 +67,15 @@ class DashboardScreenState extends State<DashboardScreen> {
 class _GoalData {
   final Goal goal;
   final int streak;
-  final double weekPct;
-  final double monthPct;
+  final double shortPct;
+  final double longPct;
   final List<Entry> entries;
 
   const _GoalData({
     required this.goal,
     required this.streak,
-    required this.weekPct,
-    required this.monthPct,
+    required this.shortPct,
+    required this.longPct,
     required this.entries,
   });
 }
@@ -88,6 +87,8 @@ class _GoalCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final g = data.goal;
+    final (shortN, longN) = _pctPeriods(g);
+    final suffix = g.isWeeklyEval ? 'wk' : g.isMonthlyEval ? 'mo' : 'day';
     return Container(
       margin: const EdgeInsets.only(bottom: 16),
       decoration: BoxDecoration(
@@ -102,17 +103,19 @@ class _GoalCard extends StatelessWidget {
             padding: const EdgeInsets.fromLTRB(16, 14, 16, 0),
             child: Row(
               children: [
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                  decoration: BoxDecoration(
-                    color: kPurple.withValues(alpha: 0.15),
-                    borderRadius: BorderRadius.circular(4),
+                if (g.category.isNotEmpty) ...[
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                    decoration: BoxDecoration(
+                      color: kPurple.withValues(alpha: 0.15),
+                      borderRadius: BorderRadius.circular(4),
+                    ),
+                    child: Text(g.category,
+                        style: const TextStyle(color: kPurple, fontSize: 11,
+                            fontWeight: FontWeight.w600)),
                   ),
-                  child: Text(g.category,
-                      style: const TextStyle(color: kPurple, fontSize: 11,
-                          fontWeight: FontWeight.w600)),
-                ),
-                const SizedBox(width: 10),
+                  const SizedBox(width: 10),
+                ],
                 Expanded(
                   child: Text(g.name,
                       style: const TextStyle(fontSize: 16,
@@ -126,19 +129,18 @@ class _GoalCard extends StatelessWidget {
             child: Row(
               children: [
                 _Stat(label: 'Streak',
-                    value: g.isWeeklyFreq
-                        ? '${data.streak}w'
-                        : '${data.streak}d'),
+                    value: '${data.streak}${g.isWeeklyEval ? 'w' : g.isMonthlyEval ? 'mo' : 'd'}'),
                 const SizedBox(width: 20),
-                _Stat(label: '7-day', value: '${data.weekPct.toStringAsFixed(0)}%',
-                    color: pctColor(data.weekPct)),
+                _Stat(label: '$shortN-$suffix', value: '${data.shortPct.toStringAsFixed(0)}%',
+                    color: pctColor(data.shortPct)),
                 const SizedBox(width: 20),
-                _Stat(label: '30-day', value: '${data.monthPct.toStringAsFixed(0)}%',
-                    color: pctColor(data.monthPct)),
+                _Stat(label: '$longN-$suffix', value: '${data.longPct.toStringAsFixed(0)}%',
+                    color: pctColor(data.longPct)),
                 const Spacer(),
                 Text(
                   '${g.directionSymbol} ${g.targetValue % 1 == 0 ? g.targetValue.toInt() : g.targetValue}'
-                  '${g.unit != null ? " ${g.unit}" : ""}',
+                  '${g.unit != null ? " ${g.unit}" : ""}'
+                  '${g.isDailyEval ? "" : " / ${g.periodNoun}"}',
                   style: const TextStyle(color: kMuted, fontSize: 12),
                 ),
               ],
@@ -189,8 +191,8 @@ class _GoalChart extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final g = data.goal;
-    if (g.isWeeklyEval || g.isWeeklyFreq) {
-      return _WeeklyBarChart(data: data);
+    if (!g.isDailyEval) {
+      return _PeriodBarChart(data: data);
     } else if (g.isBoolean) {
       return _BooleanGrid(data: data);
     } else {
@@ -199,28 +201,33 @@ class _GoalChart extends StatelessWidget {
   }
 }
 
-// 10-week bar chart for weekly goals
-class _WeeklyBarChart extends StatelessWidget {
+// Bar per week (last 10) or month (last 12) for weekly/monthly goals
+class _PeriodBarChart extends StatelessWidget {
   final _GoalData data;
-  const _WeeklyBarChart({required this.data});
+  const _PeriodBarChart({required this.data});
 
   @override
   Widget build(BuildContext context) {
     final g = data.goal;
     final today = DateTime.now();
-    final weeks = <String, double>{};
+    final totals = <String, double>{};
 
-    for (int i = 9; i >= 0; i--) {
-      final mon = _weekMonday(today.subtract(Duration(days: i * 7)));
-      weeks[_fmt(mon)] = 0;
+    for (int i = _chartPeriods(g) - 1; i >= 0; i--) {
+      totals[_fmt(g.periodsAgo(today, i))] = 0;
     }
     for (final e in data.entries) {
-      final mon = _weekMonday(DateTime.parse(e.date));
-      final key = _fmt(mon);
-      if (weeks.containsKey(key)) weeks[key] = (weeks[key] ?? 0) + e.value;
+      final key = _fmt(g.periodStart(DateTime.parse(e.date)));
+      if (totals.containsKey(key)) totals[key] = totals[key]! + e.value;
     }
 
-    final vals = weeks.values.toList();
+    final vals = totals.values.toList();
+    final todayStr = _fmt(today);
+    final loggedToday = data.entries.any((e) => e.date == todayStr);
+    // Same status as Today/History: the current period can be on target
+    // (still reachable), behind pace or off; past periods are final.
+    final colors = totals.keys.map((key) => statusColor(periodStatus(
+        g, totals[key]!, DateTime.parse(key),
+        today: today, loggedToday: loggedToday).level)).toList();
     final maxY = (vals.isEmpty ? g.targetValue : vals.reduce((a, b) => a > b ? a : b))
         .clamp(g.targetValue, double.infinity) * 1.3;
 
@@ -228,11 +235,10 @@ class _WeeklyBarChart extends StatelessWidget {
       alignment: BarChartAlignment.spaceAround,
       maxY: maxY,
       barGroups: vals.asMap().entries.map((e) {
-        final onTarget = g.isOnTarget(e.value);
         return BarChartGroupData(x: e.key, barRods: [
           BarChartRodData(
             toY: e.value == 0 ? 0.05 : e.value,
-            color: onTarget ? kGreen : kRed,
+            color: colors[e.key],
             width: 16,
             borderRadius: const BorderRadius.vertical(top: Radius.circular(3)),
           ),
@@ -363,4 +369,10 @@ class _NumberLineChart extends StatelessWidget {
 String _fmt(DateTime d) =>
     '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
 
-DateTime _weekMonday(DateTime d) => d.subtract(Duration(days: d.weekday - 1));
+/// Periods covered by the short and long on-target percentages.
+(int, int) _pctPeriods(Goal g) =>
+    g.isWeeklyEval ? (4, 12) : g.isMonthlyEval ? (3, 12) : (7, 30);
+
+/// Periods shown in the goal's chart.
+int _chartPeriods(Goal g) =>
+    g.isWeeklyEval ? 10 : g.isMonthlyEval ? 12 : 30;

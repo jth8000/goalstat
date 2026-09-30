@@ -6,19 +6,22 @@ import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 
 import '../data/database.dart';
+import '../models/goal.dart';
+import '../models/period_status.dart';
 import '../theme.dart';
 
 class HistoryScreen extends StatefulWidget {
   const HistoryScreen({super.key});
 
   @override
-  State<HistoryScreen> createState() => _HistoryScreenState();
+  State<HistoryScreen> createState() => HistoryScreenState();
 }
 
-class _HistoryScreenState extends State<HistoryScreen> {
+class HistoryScreenState extends State<HistoryScreen> {
   final _db = AppDatabase.instance;
   int _periodIdx = 0;
   List<Map<String, dynamic>> _entries = [];
+  List<PeriodStatus> _statuses = [];
   bool _loading = false;
 
   static const _periods = ['This Week', 'This Month', 'Last 3 Months', 'All Time'];
@@ -44,21 +47,56 @@ class _HistoryScreenState extends State<HistoryScreen> {
     }
   }
 
+  Future<void> refresh() => _load();
+
   Future<void> _load() async {
     setState(() => _loading = true);
     final (start, end) = _dateRange();
     final entries = await _db.getAllEntries(_fmt(start), _fmt(end));
-    if (mounted) setState(() { _entries = entries; _loading = false; });
+    final statuses = await _statusesFor(entries);
+    if (mounted) {
+      setState(() { _entries = entries; _statuses = statuses; _loading = false; });
+    }
   }
 
-  bool _isOnTarget(Map<String, dynamic> e) {
-    final val = (e['value'] as num).toDouble();
-    final target = (e['target_value'] as num).toDouble();
-    switch (e['target_direction'] as String) {
-      case 'gte': return val >= target;
-      case 'lte': return val <= target;
-      default: return val == target;
+  /// Daily goals are judged per entry; weekly/monthly goals by the total of
+  /// the whole period each entry falls in, which may extend past the range.
+  Future<List<PeriodStatus>> _statusesFor(List<Map<String, dynamic>> entries) async {
+    final goals = {for (final g in await _db.getGoals()) g.id!: g};
+    final today = DateTime.now();
+    final todayStr = _fmt(today);
+    String periodKey(Goal g, String date) =>
+        '${g.id}|${_fmt(g.periodStart(DateTime.parse(date)))}';
+
+    DateTime? earliest;
+    for (final e in entries) {
+      final g = goals[e['goal_id']]!;
+      if (g.isDailyEval) continue;
+      final s = g.periodStart(DateTime.parse(e['date'] as String));
+      if (earliest == null || s.isBefore(earliest)) earliest = s;
     }
+
+    final totals = <String, double>{};
+    final loggedToday = <int>{};
+    if (earliest != null) {
+      for (final e in await _db.getAllEntries(_fmt(earliest), todayStr)) {
+        final g = goals[e['goal_id']]!;
+        if (g.isDailyEval) continue;
+        final key = periodKey(g, e['date'] as String);
+        totals[key] = (totals[key] ?? 0) + (e['value'] as num).toDouble();
+        if (e['date'] == todayStr) loggedToday.add(g.id!);
+      }
+    }
+
+    return entries.map((e) {
+      final g = goals[e['goal_id']]!;
+      final date = e['date'] as String;
+      final total = g.isDailyEval
+          ? (e['value'] as num).toDouble()
+          : totals[periodKey(g, date)] ?? 0;
+      return periodStatus(g, total, DateTime.parse(date),
+          today: today, loggedToday: loggedToday.contains(g.id));
+    }).toList();
   }
 
   String _formatValue(Map<String, dynamic> e) {
@@ -69,20 +107,18 @@ class _HistoryScreenState extends State<HistoryScreen> {
   }
 
   Future<void> _export() async {
-    final (start, end) = _dateRange();
-    final allEntries = await _db.getAllEntries(_fmt(start), _fmt(end));
-
     final rows = <List<dynamic>>[
-      ['Date', 'Goal', 'Category', 'Value', 'Unit', 'On Target']
+      ['Date', 'Goal', 'Category', 'Value', 'Unit', 'Evaluated', 'Status']
     ];
-    for (final e in allEntries) {
+    for (final (i, e) in _entries.indexed) {
       rows.add([
         e['date'],
         e['name'],
         e['category'],
         e['value'],
         e['unit'] ?? '',
-        _isOnTarget(e) ? 'Yes' : 'No',
+        e['eval_period'],
+        _statuses[i],
       ]);
     }
 
@@ -124,7 +160,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
                     ? const Center(
                         child: Text('No entries for this period.',
                             style: TextStyle(color: kMuted)))
-                    : _EntryTable(entries: _entries, isOnTarget: _isOnTarget,
+                    : _EntryTable(entries: _entries, statuses: _statuses,
                         formatValue: _formatValue),
           ),
         ],
@@ -183,10 +219,10 @@ class _PeriodPicker extends StatelessWidget {
 
 class _EntryTable extends StatelessWidget {
   final List<Map<String, dynamic>> entries;
-  final bool Function(Map<String, dynamic>) isOnTarget;
+  final List<PeriodStatus> statuses;
   final String Function(Map<String, dynamic>) formatValue;
 
-  const _EntryTable({required this.entries, required this.isOnTarget,
+  const _EntryTable({required this.entries, required this.statuses,
       required this.formatValue});
 
   @override
@@ -203,13 +239,14 @@ class _EntryTable extends StatelessWidget {
                 Expanded(flex: 2, child: Text('Date', style: TextStyle(color: kMuted, fontSize: 12, fontWeight: FontWeight.w600))),
                 Expanded(flex: 3, child: Text('Goal', style: TextStyle(color: kMuted, fontSize: 12, fontWeight: FontWeight.w600))),
                 Expanded(flex: 2, child: Text('Value', style: TextStyle(color: kMuted, fontSize: 12, fontWeight: FontWeight.w600), textAlign: TextAlign.right)),
-                SizedBox(width: 60, child: Text('Status', style: TextStyle(color: kMuted, fontSize: 12, fontWeight: FontWeight.w600), textAlign: TextAlign.right)),
+                SizedBox(width: 96, child: Text('Status', style: TextStyle(color: kMuted, fontSize: 12, fontWeight: FontWeight.w600), textAlign: TextAlign.right)),
               ],
             ),
           );
         }
         final e = entries[i - 1];
-        final on = isOnTarget(e);
+        final status = statuses[i - 1];
+        final color = statusColor(status.level);
         return Container(
           decoration: BoxDecoration(
             border: Border(bottom: BorderSide(color: kBorder.withValues(alpha: 0.4))),
@@ -226,8 +263,9 @@ class _EntryTable extends StatelessWidget {
                 children: [
                   Text(e['name'] as String,
                       style: const TextStyle(color: kText, fontSize: 13)),
-                  Text(e['category'] as String,
-                      style: const TextStyle(color: kMuted, fontSize: 11)),
+                  if ((e['category'] as String).isNotEmpty)
+                    Text(e['category'] as String,
+                        style: const TextStyle(color: kMuted, fontSize: 11)),
                 ],
               )),
               Expanded(flex: 2, child: Text(
@@ -236,15 +274,19 @@ class _EntryTable extends StatelessWidget {
                 style: const TextStyle(color: kText, fontSize: 13),
               )),
               SizedBox(
-                width: 60,
-                child: Text(
-                  on ? 'On target' : 'Off',
-                  textAlign: TextAlign.right,
-                  style: TextStyle(
-                    color: on ? kGreen : kRed,
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
-                  ),
+                width: 96,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    Text(status.label,
+                        textAlign: TextAlign.right,
+                        style: TextStyle(color: color, fontSize: 12,
+                            fontWeight: FontWeight.w600)),
+                    if (status.detail != null)
+                      Text(status.detail!,
+                          textAlign: TextAlign.right,
+                          style: TextStyle(color: color, fontSize: 10)),
+                  ],
                 ),
               ),
             ],

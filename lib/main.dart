@@ -33,14 +33,18 @@ class AppShell extends StatefulWidget {
 
 class _AppShellState extends State<AppShell> {
   int _tab = 0;
+  final _todayKey = GlobalKey<TodayScreenState>();
   final _dashKey = GlobalKey<DashboardScreenState>();
+  final _historyKey = GlobalKey<HistoryScreenState>();
 
   void _onSaved() {
     if (_tab == 1) _dashKey.currentState?.refresh();
   }
 
   void _onGoalsChanged() {
+    _todayKey.currentState?.refresh();
     _dashKey.currentState?.refresh();
+    _historyKey.currentState?.refresh();
   }
 
   @override
@@ -49,9 +53,9 @@ class _AppShellState extends State<AppShell> {
       body: IndexedStack(
         index: _tab,
         children: [
-          TodayScreen(onSaved: _onSaved),
+          TodayScreen(key: _todayKey, onSaved: _onSaved),
           DashboardScreen(key: _dashKey),
-          const HistoryScreen(),
+          HistoryScreen(key: _historyKey),
           SettingsScreen(onGoalsChanged: _onGoalsChanged),
         ],
       ),
@@ -60,6 +64,7 @@ class _AppShellState extends State<AppShell> {
         onDestinationSelected: (i) {
           setState(() => _tab = i);
           if (i == 1) _dashKey.currentState?.refresh();
+          if (i == 2) _historyKey.currentState?.refresh();
         },
         destinations: const [
           NavigationDestination(

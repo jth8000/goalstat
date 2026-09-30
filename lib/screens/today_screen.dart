@@ -3,6 +3,7 @@ import 'package:intl/intl.dart';
 
 import '../data/database.dart';
 import '../models/goal.dart';
+import '../models/period_status.dart';
 import '../theme.dart';
 import '../widgets/toggle_switch.dart';
 
@@ -11,17 +12,19 @@ class TodayScreen extends StatefulWidget {
   const TodayScreen({super.key, required this.onSaved});
 
   @override
-  State<TodayScreen> createState() => _TodayScreenState();
+  State<TodayScreen> createState() => TodayScreenState();
 }
 
-class _TodayScreenState extends State<TodayScreen> {
+class TodayScreenState extends State<TodayScreen> {
   final _db = AppDatabase.instance;
   List<Goal> _goals = [];
   final Map<int, double> _values = {};
-  final Map<int, String> _dates = {};
+  String _date = '';
+  bool _loading = true;
   bool _saving = false;
   bool _saved = false;
-  final Map<int, double> _weeklySums = {};
+  final Map<int, double> _periodSums = {};
+  final Map<int, PeriodStatus> _statuses = {};
 
   @override
   void initState() {
@@ -29,35 +32,38 @@ class _TodayScreenState extends State<TodayScreen> {
     _load();
   }
 
+  Future<void> refresh() => _load();
+
   Future<void> _load() async {
     final goals = await _db.getGoals();
     final today = DateTime.now();
     final todayStr = _fmtDate(today);
-    final monday = _weekMonday(today);
-    final mondayStr = _fmtDate(monday);
-    final sundayStr = _fmtDate(monday.add(const Duration(days: 6)));
 
     final Map<int, double> values = {};
-    final Map<int, String> dates = {};
-    final Map<int, double> weeklySums = {};
+    final Map<int, double> periodSums = {};
+    final Map<int, PeriodStatus> statuses = {};
 
     for (final g in goals) {
-      final dateStr = g.isWeeklyFreq ? mondayStr : todayStr;
-      dates[g.id!] = dateStr;
-      final entry = await _db.getEntry(g.id!, dateStr);
-      values[g.id!] = entry?.value ?? (g.isBoolean ? 0.0 : 0.0);
+      final entry = await _db.getEntry(g.id!, todayStr);
+      values[g.id!] = entry?.value ?? 0.0;
 
-      if (g.isWeeklyEval && !g.isWeeklyFreq) {
-        weeklySums[g.id!] = await _db.getWeeklySum(g.id!, mondayStr, sundayStr);
+      if (!g.isDailyEval) {
+        final sum = await _db.getPeriodSum(g.id!,
+            _fmtDate(g.periodStart(today)), _fmtDate(g.periodEnd(today)));
+        periodSums[g.id!] = sum;
+        statuses[g.id!] = periodStatus(g, sum, today,
+            today: today, loggedToday: entry != null);
       }
     }
 
     if (mounted) {
       setState(() {
         _goals = goals;
+        _loading = false;
         _values.addAll(values);
-        _dates.addAll(dates);
-        _weeklySums.addAll(weeklySums);
+        _date = todayStr;
+        _periodSums.addAll(periodSums);
+        _statuses.addAll(statuses);
       });
     }
   }
@@ -65,7 +71,7 @@ class _TodayScreenState extends State<TodayScreen> {
   Future<void> _save() async {
     setState(() => _saving = true);
     for (final g in _goals) {
-      await _db.saveEntry(g.id!, _dates[g.id!]!, _values[g.id!] ?? 0);
+      await _db.saveEntry(g.id!, _date, _values[g.id!] ?? 0);
     }
     setState(() { _saving = false; _saved = true; });
     widget.onSaved();
@@ -98,16 +104,20 @@ class _TodayScreenState extends State<TodayScreen> {
       body: Column(
         children: [
           Expanded(
-            child: _goals.isEmpty
+            child: _loading
                 ? const Center(child: CircularProgressIndicator())
-                : ListView(
+                : _goals.isEmpty
+                    ? const Center(child: Text('No goals yet. Add one in Settings.',
+                        style: TextStyle(color: kMuted)))
+                    : ListView(
                     padding: const EdgeInsets.all(16),
                     children: byCategory.entries.map((entry) {
                       return _CategoryGroup(
                         category: entry.key,
                         goals: entry.value,
                         values: _values,
-                        weeklySums: _weeklySums,
+                        periodSums: _periodSums,
+                        statuses: _statuses,
                         onChanged: (gid, val) => setState(() => _values[gid] = val),
                       );
                     }).toList(),
@@ -124,14 +134,16 @@ class _CategoryGroup extends StatelessWidget {
   final String category;
   final List<Goal> goals;
   final Map<int, double> values;
-  final Map<int, double> weeklySums;
+  final Map<int, double> periodSums;
+  final Map<int, PeriodStatus> statuses;
   final void Function(int goalId, double val) onChanged;
 
   const _CategoryGroup({
     required this.category,
     required this.goals,
     required this.values,
-    required this.weeklySums,
+    required this.periodSums,
+    required this.statuses,
     required this.onChanged,
   });
 
@@ -147,15 +159,16 @@ class _CategoryGroup extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
-            child: Text(
-              category.toUpperCase(),
-              style: const TextStyle(
-                color: kMuted, fontSize: 11, fontWeight: FontWeight.w700,
-                letterSpacing: 1.2),
+          if (category.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+              child: Text(
+                category.toUpperCase(),
+                style: const TextStyle(
+                  color: kMuted, fontSize: 11, fontWeight: FontWeight.w700,
+                  letterSpacing: 1.2),
+              ),
             ),
-          ),
           ...goals.asMap().entries.map((e) {
             final idx = e.key;
             final g = e.value;
@@ -165,7 +178,8 @@ class _CategoryGroup extends StatelessWidget {
                 _GoalRow(
                   goal: g,
                   value: values[g.id!] ?? 0,
-                  weeklySum: weeklySums[g.id!],
+                  periodSum: periodSums[g.id!],
+                  status: statuses[g.id!],
                   onChanged: (val) => onChanged(g.id!, val),
                 ),
               ],
@@ -180,25 +194,26 @@ class _CategoryGroup extends StatelessWidget {
 class _GoalRow extends StatelessWidget {
   final Goal goal;
   final double value;
-  final double? weeklySum;
+  final double? periodSum;
+  final PeriodStatus? status;
   final ValueChanged<double> onChanged;
 
   const _GoalRow({
     required this.goal,
     required this.value,
-    this.weeklySum,
+    this.periodSum,
+    this.status,
     required this.onChanged,
   });
 
   @override
   Widget build(BuildContext context) {
     String? context_;
-    if (weeklySum != null && !goal.isWeeklyFreq) {
-      final sym = goal.directionSymbol;
-      final t = goal.targetValue.toInt();
-      context_ = 'This week: ${weeklySum!.toInt()} times  (goal: $sym $t/week)';
-    } else if (goal.isWeeklyFreq) {
-      context_ = 'Logged once per week';
+    if (periodSum != null) {
+      final period = goal.periodNoun;
+      final unit = goal.isBoolean ? ' times' : (goal.unit != null ? ' ${goal.unit}' : '');
+      context_ = 'This $period: ${_num(periodSum!)}$unit  '
+          '(goal: ${goal.directionSymbol} ${_num(goal.targetValue)}/$period)';
     }
 
     return Padding(
@@ -214,6 +229,12 @@ class _GoalRow extends StatelessWidget {
                 if (context_ != null) ...[
                   const SizedBox(height: 2),
                   Text(context_, style: const TextStyle(fontSize: 11, color: kMuted)),
+                ],
+                if (status != null) ...[
+                  const SizedBox(height: 2),
+                  Text(status.toString(),
+                      style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600,
+                          color: statusColor(status!.level))),
                 ],
               ],
             ),
@@ -330,4 +351,4 @@ class _SaveBar extends StatelessWidget {
 String _fmtDate(DateTime d) =>
     '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
 
-DateTime _weekMonday(DateTime d) => d.subtract(Duration(days: d.weekday - 1));
+String _num(double v) => v % 1 == 0 ? v.toInt().toString() : v.toString();

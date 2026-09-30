@@ -15,6 +15,7 @@ class SettingsScreen extends StatefulWidget {
 class _SettingsScreenState extends State<SettingsScreen> {
   final _db = AppDatabase.instance;
   List<Goal> _goals = [];
+  bool _loading = true;
 
   @override
   void initState() {
@@ -23,13 +24,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Future<void> _load() async {
-    final goals = await _db.getGoals(activeOnly: false);
-    if (mounted) setState(() => _goals = goals);
+    final goals = await _db.getGoals();
+    if (mounted) setState(() { _goals = goals; _loading = false; });
   }
+
+  List<String> get _categories =>
+      _goals.map((g) => g.category).where((c) => c.isNotEmpty).toSet().toList()
+        ..sort();
 
   void _add() async {
     final data = await showDialog<_GoalFormData>(
-        context: context, builder: (_) => const _GoalDialog());
+        context: context,
+        builder: (_) => _GoalDialog(categories: _categories));
     if (data == null) return;
     await _db.addGoal(data.toGoal());
     _load();
@@ -38,7 +44,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   void _edit(Goal g) async {
     final data = await showDialog<_GoalFormData>(
-        context: context, builder: (_) => _GoalDialog(goal: g));
+        context: context,
+        builder: (_) => _GoalDialog(goal: g, categories: _categories));
     if (data == null) return;
     await _db.updateGoal(data.toGoal(id: g.id));
     _load();
@@ -49,20 +56,21 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final confirm = await showDialog<bool>(
       context: context,
       builder: (_) => AlertDialog(
-        title: const Text('Remove Goal'),
-        content: Text('Remove "${g.name}"?\n\nExisting entries will be kept.'),
+        title: const Text('Delete Goal'),
+        content: Text('Delete "${g.name}"?\n\n'
+            'All of its logged entries will be deleted too. This can\'t be undone.'),
         actions: [
           TextButton(onPressed: () => Navigator.pop(context, false),
               child: const Text('Cancel')),
           TextButton(
             onPressed: () => Navigator.pop(context, true),
-            child: const Text('Remove', style: TextStyle(color: kRed)),
+            child: const Text('Delete', style: TextStyle(color: kRed)),
           ),
         ],
       ),
     );
     if (confirm != true) return;
-    await _db.deactivateGoal(g.id!);
+    await _db.deleteGoal(g.id!);
     _load();
     widget.onGoalsChanged();
   }
@@ -80,16 +88,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
         ],
       ),
-      body: _goals.isEmpty
+      body: _loading
           ? const Center(child: CircularProgressIndicator())
-          : ListView.separated(
+          : _goals.isEmpty
+              ? const Center(child: Text('No goals yet. Tap + to add one.',
+                  style: TextStyle(color: kMuted)))
+              : ListView.separated(
               padding: const EdgeInsets.all(16),
               itemCount: _goals.length,
               separatorBuilder: (context, idx) => const SizedBox(height: 8),
               itemBuilder: (_, i) => _GoalTile(
                 goal: _goals[i],
                 onEdit: () => _edit(_goals[i]),
-                onDelete: _goals[i].active ? () => _delete(_goals[i]) : null,
+                onDelete: () => _delete(_goals[i]),
               ),
             ),
     );
@@ -99,15 +110,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
 class _GoalTile extends StatelessWidget {
   final Goal goal;
   final VoidCallback onEdit;
-  final VoidCallback? onDelete;
+  final VoidCallback onDelete;
 
-  const _GoalTile({required this.goal, required this.onEdit, this.onDelete});
+  const _GoalTile({required this.goal, required this.onEdit, required this.onDelete});
 
   @override
   Widget build(BuildContext context) {
     final g = goal;
-    final freq = g.isWeeklyFreq ? 'Weekly' : 'Daily';
-    final eval = g.isWeeklyEval && !g.isWeeklyFreq ? ' / Weekly eval' : '';
+    final period = g.evalPeriod[0].toUpperCase() + g.evalPeriod.substring(1);
     return Container(
       decoration: BoxDecoration(
         color: kSurface,
@@ -121,28 +131,15 @@ class _GoalTile extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Row(children: [
-                  if (!g.active)
-                    Container(
-                      margin: const EdgeInsets.only(right: 6),
-                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
-                      decoration: BoxDecoration(
-                        color: kMuted.withValues(alpha: 0.15),
-                        borderRadius: BorderRadius.circular(4),
-                      ),
-                      child: const Text('Inactive',
-                          style: TextStyle(color: kMuted, fontSize: 10)),
-                    ),
-                  Text(g.name,
-                      style: TextStyle(
-                        fontSize: 15,
-                        fontWeight: FontWeight.w600,
-                        color: g.active ? kText : kMuted,
-                      )),
-                ]),
+                Text(g.name,
+                    style: const TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.w600,
+                      color: kText,
+                    )),
                 const SizedBox(height: 4),
                 Text(
-                  '${g.category}  ·  ${g.isBoolean ? "Yes/No" : "Number${g.unit != null ? " (${g.unit})" : ""}"}  ·  $freq$eval  ·  ${g.directionSymbol} ${g.targetValue % 1 == 0 ? g.targetValue.toInt() : g.targetValue}',
+                  '${g.category.isNotEmpty ? "${g.category}  ·  " : ""}${g.isBoolean ? "Yes/No" : "Number${g.unit != null ? " (${g.unit})" : ""}"}  ·  $period  ·  ${g.directionSymbol} ${g.targetValue % 1 == 0 ? g.targetValue.toInt() : g.targetValue}',
                   style: const TextStyle(color: kMuted, fontSize: 12),
                 ),
               ],
@@ -153,12 +150,11 @@ class _GoalTile extends StatelessWidget {
             onPressed: onEdit,
             tooltip: 'Edit',
           ),
-          if (onDelete != null)
-            IconButton(
-              icon: const Icon(Icons.delete_outline, color: kRed, size: 20),
-              onPressed: onDelete,
-              tooltip: 'Remove',
-            ),
+          IconButton(
+            icon: const Icon(Icons.delete_outline, color: kRed, size: 20),
+            onPressed: onDelete,
+            tooltip: 'Delete',
+          ),
         ],
       ),
     );
@@ -172,7 +168,6 @@ class _GoalFormData {
   final String category;
   final String type;
   final String? unit;
-  final String frequency;
   final String evalPeriod;
   final double targetValue;
   final String targetDirection;
@@ -182,7 +177,6 @@ class _GoalFormData {
     required this.category,
     required this.type,
     this.unit,
-    required this.frequency,
     required this.evalPeriod,
     required this.targetValue,
     required this.targetDirection,
@@ -191,14 +185,15 @@ class _GoalFormData {
   Goal toGoal({int? id}) => Goal(
     id: id,
     name: name, category: category, type: type, unit: unit,
-    frequency: frequency, evalPeriod: evalPeriod,
+    evalPeriod: evalPeriod,
     targetValue: targetValue, targetDirection: targetDirection,
   );
 }
 
 class _GoalDialog extends StatefulWidget {
   final Goal? goal;
-  const _GoalDialog({this.goal});
+  final List<String> categories;
+  const _GoalDialog({this.goal, this.categories = const []});
 
   @override
   State<_GoalDialog> createState() => _GoalDialogState();
@@ -208,9 +203,8 @@ class _GoalDialogState extends State<_GoalDialog> {
   final _nameCtrl = TextEditingController();
   final _unitCtrl = TextEditingController();
   final _targetCtrl = TextEditingController();
-  String _category = 'Habits';
+  final _categoryCtrl = TextEditingController();
   String _type = 'boolean';
-  String _frequency = 'daily';
   String _evalPeriod = 'daily';
   String _direction = 'gte';
 
@@ -220,10 +214,9 @@ class _GoalDialogState extends State<_GoalDialog> {
     final g = widget.goal;
     if (g != null) {
       _nameCtrl.text = g.name;
-      _category = g.category;
+      _categoryCtrl.text = g.category;
       _type = g.type;
       _unitCtrl.text = g.unit ?? '';
-      _frequency = g.frequency;
       _evalPeriod = g.evalPeriod;
       _targetCtrl.text = g.targetValue.toString();
       _direction = g.targetDirection;
@@ -235,6 +228,7 @@ class _GoalDialogState extends State<_GoalDialog> {
   @override
   void dispose() {
     _nameCtrl.dispose(); _unitCtrl.dispose(); _targetCtrl.dispose();
+    _categoryCtrl.dispose();
     super.dispose();
   }
 
@@ -246,13 +240,16 @@ class _GoalDialogState extends State<_GoalDialog> {
     }
     final target = double.tryParse(_targetCtrl.text) ?? 1.0;
     final unit = _unitCtrl.text.trim().isEmpty ? null : _unitCtrl.text.trim();
+    // Reuse an existing category's spelling so "fitness" groups with "Fitness".
+    final typed = _categoryCtrl.text.trim();
+    final category = widget.categories.firstWhere(
+        (c) => c.toLowerCase() == typed.toLowerCase(), orElse: () => typed);
     Navigator.pop(context, _GoalFormData(
       name: _nameCtrl.text.trim(),
-      category: _category,
+      category: category,
       type: _type,
       unit: _type == 'boolean' ? null : unit,
-      frequency: _frequency,
-      evalPeriod: _frequency == 'weekly' ? 'weekly' : _evalPeriod,
+      evalPeriod: _evalPeriod,
       targetValue: target,
       targetDirection: _direction,
     ));
@@ -271,10 +268,9 @@ class _GoalDialogState extends State<_GoalDialog> {
               controller: _nameCtrl,
               decoration: const InputDecoration(hintText: 'e.g. Morning Run'),
             )),
-            _field('Category', _DropdownField<String>(
-              value: _category,
-              items: const ['Habits', 'Career', 'Exploration'],
-              onChanged: (v) => setState(() => _category = v!),
+            _field('Category (optional)', _CategoryField(
+              controller: _categoryCtrl,
+              categories: widget.categories,
             )),
             _field('Type', _DropdownField<String>(
               value: _type,
@@ -287,29 +283,22 @@ class _GoalDialogState extends State<_GoalDialog> {
                 controller: _unitCtrl,
                 decoration: const InputDecoration(hintText: 'e.g. hrs, apps'),
               )),
-            _field('Frequency', _DropdownField<String>(
-              value: _frequency,
-              items: const ['daily', 'weekly'],
-              labels: const ['Daily', 'Weekly'],
-              onChanged: (v) => setState(() {
-                _frequency = v!;
-                if (_frequency == 'weekly') _evalPeriod = 'weekly';
-              }),
+            _field('Evaluate', _DropdownField<String>(
+              value: _evalPeriod,
+              items: const ['daily', 'weekly', 'monthly'],
+              labels: const ['Daily', 'Weekly', 'Monthly'],
+              onChanged: (v) => setState(() => _evalPeriod = v!),
             )),
-            if (_frequency == 'daily')
-              _field('Evaluate', _DropdownField<String>(
-                value: _evalPeriod,
-                items: const ['daily', 'weekly'],
-                labels: const ['Daily', 'Weekly'],
-                onChanged: (v) => setState(() => _evalPeriod = v!),
-              )),
             _field('Direction', _DropdownField<String>(
               value: _direction,
               items: const ['gte', 'lte', 'eq'],
               labels: const ['≥  at least', '≤  at most', '=  exactly'],
               onChanged: (v) => setState(() => _direction = v!),
             )),
-            _field('Target', TextField(
+            _field(_evalPeriod == 'daily'
+                ? 'Target'
+                : 'Target (total per ${_evalPeriod == 'weekly' ? 'week' : 'month'})',
+                TextField(
               controller: _targetCtrl,
               keyboardType: const TextInputType.numberWithOptions(decimal: true),
             )),
@@ -336,6 +325,65 @@ class _GoalDialogState extends State<_GoalDialog> {
       ],
     ),
   );
+}
+
+class _CategoryField extends StatefulWidget {
+  final TextEditingController controller;
+  final List<String> categories;
+
+  const _CategoryField({required this.controller, required this.categories});
+
+  @override
+  State<_CategoryField> createState() => _CategoryFieldState();
+}
+
+class _CategoryFieldState extends State<_CategoryField> {
+  final _focusNode = FocusNode();
+
+  @override
+  void dispose() {
+    _focusNode.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return RawAutocomplete<String>(
+      textEditingController: widget.controller,
+      focusNode: _focusNode,
+      optionsBuilder: (value) {
+        final q = value.text.trim().toLowerCase();
+        return widget.categories.where((c) =>
+            c.toLowerCase().contains(q) && c.toLowerCase() != q);
+      },
+      fieldViewBuilder: (context, ctrl, focusNode, onSubmitted) => TextField(
+        controller: ctrl,
+        focusNode: focusNode,
+        textCapitalization: TextCapitalization.words,
+        decoration: const InputDecoration(hintText: 'e.g. Fitness'),
+      ),
+      optionsViewBuilder: (context, onSelected, options) => Align(
+        alignment: Alignment.topLeft,
+        child: Material(
+          color: kSurface2,
+          elevation: 4,
+          borderRadius: BorderRadius.circular(8),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxHeight: 200, maxWidth: 240),
+            child: ListView(
+              padding: EdgeInsets.zero,
+              shrinkWrap: true,
+              children: options.map((c) => ListTile(
+                dense: true,
+                title: Text(c),
+                onTap: () => onSelected(c),
+              )).toList(),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 class _DropdownField<T> extends StatelessWidget {
