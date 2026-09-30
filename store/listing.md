@@ -41,5 +41,5 @@ phone unless you export it.
 
 ## Assets
 - App icon, 512×512: `store/play_icon_512.png`
-- Feature graphic, 1024×500: TODO
-- Phone screenshots (2–8, 16:9 or 9:16): take from the emulator
+- Feature graphic, 1024×500: `store/feature_graphic.png` (source: `feature_graphic.svg`)
+- Phone screenshots, 1080×2160: `store/screenshots/01–06_*.png`

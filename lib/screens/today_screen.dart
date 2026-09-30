@@ -304,9 +304,11 @@ class _GoalRow extends StatelessWidget {
           : goal.isMonthlyEval
               ? DateFormat('MMMM y').format(day)
               : 'Week of ${DateFormat('MMM d').format(goal.periodStart(day))}';
-      context_ = '$when: ${_num(periodSum!)}$unit  '
-          '(goal: ${goal.directionSymbol} ${_num(goal.targetValue)}'
+      final target = '(goal: ${goal.directionSymbol} ${_num(goal.targetValue)}'
           '${!goal.isBoolean && goal.unit != null ? ' ${goal.unit}' : ''}/$period)';
+      // Wrap before the goal, never inside it (e.g. after "hrs/").
+      context_ = '$when: ${_num(periodSum!)}$unit  '
+          '${target.replaceAll(' ', '\u00A0').replaceAll('/', '/\u2060')}';
     }
 
     return Padding(
